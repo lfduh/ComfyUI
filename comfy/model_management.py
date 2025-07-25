@@ -128,6 +128,11 @@ try:
 except:
     mlu_available = False
 
+try:
+    ixuca_available = hasattr(torch, "corex")
+except:
+    ixuca_available = False
+
 if args.cpu:
     cpu_state = CPUState.CPU
 
@@ -148,6 +153,12 @@ def is_ascend_npu():
 def is_mlu():
     global mlu_available
     if mlu_available:
+        return True
+    return False
+
+def is_ixuca():
+    global ixuca_available
+    if ixuca_available:
         return True
     return False
 
@@ -186,10 +197,7 @@ def get_total_memory(dev=None, torch_total_too=False):
         elif is_intel_xpu():
             stats = torch.xpu.memory_stats(dev)
             mem_reserved = stats['reserved_bytes.all.current']
-            if torch_version_numeric < (2, 6):
-                mem_total_xpu = torch.xpu.get_device_properties(dev).total_memory
-            else:
-                _, mem_total_xpu = torch.xpu.mem_get_info(dev)
+            mem_total_xpu = torch.xpu.get_device_properties(dev).total_memory
             mem_total_torch = mem_reserved
             mem_total = mem_total_xpu
         elif is_ascend_npu():
@@ -292,7 +300,7 @@ try:
         if torch_version_numeric[0] >= 2:
             if ENABLE_PYTORCH_ATTENTION == False and args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
                 ENABLE_PYTORCH_ATTENTION = True
-    if is_intel_xpu() or is_ascend_npu() or is_mlu():
+    if is_intel_xpu() or is_ascend_npu() or is_mlu() or is_ixuca():
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
             ENABLE_PYTORCH_ATTENTION = True
 except:
@@ -311,7 +319,10 @@ try:
         logging.info("ROCm version: {}".format(rocm_version))
         if args.use_split_cross_attention == False and args.use_quad_cross_attention == False:
             if torch_version_numeric >= (2, 7):  # works on 2.6 but doesn't actually seem to improve much
-                if any((a in arch) for a in ["gfx90a", "gfx942", "gfx1100", "gfx1101", "gfx1151"]):  # TODO: more arches, TODO: gfx1201 and gfx950
+                if any((a in arch) for a in ["gfx90a", "gfx942", "gfx1100", "gfx1101", "gfx1151"]):  # TODO: more arches, TODO: gfx950
+                    ENABLE_PYTORCH_ATTENTION = True
+            if torch_version_numeric >= (2, 8):
+                if any((a in arch) for a in ["gfx1201"]):
                     ENABLE_PYTORCH_ATTENTION = True
         if torch_version_numeric >= (2, 7) and rocm_version >= (6, 4):
             if any((a in arch) for a in ["gfx1201", "gfx942", "gfx950"]):  # TODO: more arches
@@ -381,6 +392,8 @@ def get_torch_device_name(device):
             except:
                 allocator_backend = ""
             return "{} {} : {}".format(device, torch.cuda.get_device_name(device), allocator_backend)
+        elif device.type == "xpu":
+            return "{} {}".format(device, torch.xpu.get_device_name(device))
         else:
             return "{}".format(device.type)
     elif is_intel_xpu():
@@ -880,6 +893,7 @@ def vae_dtype(device=None, allowed_dtypes=[]):
             return d
 
         # NOTE: bfloat16 seems to work on AMD for the VAE but is extremely slow in some cases compared to fp32
+        # slowness still a problem on pytorch nightly 2.9.0.dev20250720+rocm6.4 tested on RDNA3
         if d == torch.bfloat16 and (not is_amd()) and should_use_bf16(device):
             return d
 
@@ -1044,6 +1058,8 @@ def xformers_enabled():
         return False
     if is_mlu():
         return False
+    if is_ixuca():
+        return False
     if directml_enabled:
         return False
     return XFORMERS_IS_AVAILABLE
@@ -1079,6 +1095,8 @@ def pytorch_attention_flash_attention():
             return True
         if is_amd():
             return True #if you have pytorch attention enabled on AMD it probably supports at least mem efficient attention
+        if is_ixuca():
+            return True
     return False
 
 def force_upcast_attention_dtype():
@@ -1109,10 +1127,7 @@ def get_free_memory(dev=None, torch_free_too=False):
             stats = torch.xpu.memory_stats(dev)
             mem_active = stats['active_bytes.all.current']
             mem_reserved = stats['reserved_bytes.all.current']
-            if torch_version_numeric < (2, 6):
-                mem_free_xpu = torch.xpu.get_device_properties(dev).total_memory - mem_reserved
-            else:
-                mem_free_xpu, _ = torch.xpu.mem_get_info(dev)
+            mem_free_xpu = torch.xpu.get_device_properties(dev).total_memory - mem_reserved
             mem_free_torch = mem_reserved - mem_active
             mem_free_total = mem_free_xpu + mem_free_torch
         elif is_ascend_npu():
@@ -1207,6 +1222,9 @@ def should_use_fp16(device=None, model_params=0, prioritize_performance=True, ma
     if is_mlu():
         return True
 
+    if is_ixuca():
+        return True
+
     if torch.version.hip:
         return True
 
@@ -1268,6 +1286,9 @@ def should_use_bf16(device=None, model_params=0, prioritize_performance=True, ma
             return torch.xpu.get_device_capability(device)['has_bfloat16_conversions']
 
     if is_ascend_npu():
+        return True
+
+    if is_ixuca():
         return True
 
     if is_amd():
